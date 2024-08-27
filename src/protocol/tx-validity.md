@@ -162,6 +162,11 @@ def input_gas_fees(tx) -> int:
 def metadata_gas_fees(tx) -> int:
     """
     Computes the intrinsic gas cost of processing transaction outputs
+    
+    The `contract_code_root_gas_fee`, `sha256_gas_fee`, and `contract_state_root_gas_fee` 
+    are based on the benchmarked gas costs of these operations.
+    
+    Consensus parameters contain definitions of gas costs for all operations and opcodes in the network.
     """
     total: int = 0
     if tx.type == TransactionType.Create:
@@ -174,9 +179,17 @@ def metadata_gas_fees(tx) -> int:
                 # add intrinsic cost of calculating the contract id 
                 # size = 4 byte seed + 32 byte salt + 32 byte code root + 32 byte state root
                 total += sha256_gas_fee(100)
-                # add intrinsic cost of calculating the transaction id
-                total += sha256_gas_fee(size(tx))
-    elif tx.type == TransactionType.Script:
+    elif tx.type == TransactionType.Upgrade:
+        if tx.upgradePurpose.type == UpgradePurposeType.ConsensusParameters:
+            # add intrinsic cost of calculating the consensus parameters hash
+            total += sha256_gas_fee(size(tx.witnesses[tx.upgradePurpose.witnessIndex].data))
+    elif tx.type == TransactionType.Upload:
+        # add intrinsic cost of calculating the root based on the number of bytecode subsections
+        total += contract_state_root_gas_fee(tx.subsectionsNumber)
+        # add intrinsic cost of hashing the subsection for verification of the connection with Binary Merkle tree root
+        total += sha256_gas_fee(size(tx.witnesses[tx.witnessIndex]))
+            
+    if tx.type != TransactionType.Mint:
         # add intrinsic cost of calculating the transaction id
         total += sha256_gas_fee(size(tx))
     return total
@@ -200,6 +213,10 @@ def min_gas(tx) -> int:
     Comutes the minimum amount of gas required for a transaction to begin processing.
     """
     gas = transaction_size_gas_fees(tx) + intrinsic_gas_fees(tx)
+    if tx.type == TransactionType.Upload
+        # charge additionally for storing bytecode on chain
+        gas += transaction_size_gas_fees(size(tx.witnesses[tx.witnessIndex]))
+        
     return gas
 
 
@@ -210,16 +227,16 @@ def max_gas(tx) -> int:
     gas = min_gas(tx)
     gas = gas + (tx.witnessBytesLimit - tx.witnessBytes) * GAS_PER_BYTE
     if tx.type == TransactionType.Script:
-       gas = gas + tx.gasLimit
+       gas += tx.gasLimit
     return gas
-
-
-def reserved_feeBalance(tx, assetId) -> int:
+    
+    
+def maxFee(tx, assetId, gasPrice) -> int:
     """
     Computes the maximum potential amount of fees that may need to be charged to process a transaction.
     """
     maxGas = max_gas(tx)
-    feeBalance = gas_to_fee(maxGas, tx.gasPrice)
+    feeBalance = gas_to_fee(maxGas, gasPrice)
     # Only base asset can be used to pay for gas
     if assetId == 0:
         return feeBalance
@@ -238,7 +255,7 @@ def available_balance(tx, assetId) -> int:
 def unavailable_balance(tx, assetId) -> int:
     sentBalance = sum_outputs(tx, assetId)
     # Total fee balance
-    feeBalance = reserved_fee_balance(tx, assetId)
+    feeBalance = tx.policies.max_fee
     # Only base asset can be used to pay for gas
     if assetId == 0:
         return sentBalance + feeBalance
@@ -305,7 +322,8 @@ If the transaction as included in a block does not match this final transaction,
 The cost of a transaction can be described by:
 
 ```py
-cost(tx) = gas_to_fee(min_gas(tx) + tx.gasLimit - unspentGas, tx.gasPrice)
+def cost(tx, gasPrice) -> int:
+    return gas_to_fee(min_gas(tx) + tx.gasLimit - unspentGas, gasPrice)
 ```
 
 where:
@@ -325,8 +343,8 @@ A naturally occurring result of a variable gas limit is the concept of minimum a
 ```py
 min_gas = min_gas(tx)
 max_gas = min_gas + (tx.witnessBytesLimit - tx.witnessBytes) * GAS_PER_BYTE + tx.gasLimit
-min_fee = gas_to_fee(min_gas, tx.gasPrice)
-max_fee = gas_to_fee(max_gas, tx.gasPrice)
+min_fee = gas_to_fee(min_gas, gasPrice)
+max_fee = gas_to_fee(max_gas, gasPrice)
 ```
 
 The cost of the transaction `cost(tx)` must lie within the range defined by [`min_fee`, `max_fee`]. `min_gas` is defined as the sum of all intrinsic costs of the transaction known prior to execution. The definition of `max_gas` illustrates that the delta between minimum gas and maximum gas is the sum of:
@@ -349,10 +367,10 @@ Given transaction `tx`, state `state`, and contract set `contracts`, the followi
 If change outputs are present, they must have:
 
 - if the transaction does not revert;
-  - if the asset ID is `0`; an `amount` of `unspentBalance + floor((unspentGas * tx.gasPrice) / GAS_PRICE_FACTOR)`
+  - if the asset ID is `0`; an `amount` of `unspentBalance + floor((unspentGas * gasPrice) / GAS_PRICE_FACTOR)`
   - otherwise; an `amount` of the unspent free balance for that asset ID after VM execution is complete
 - if the transaction reverts;
-  - if the asset ID is `0`; an `amount` of the initial free balance plus `(unspentGas * tx.gasPrice) - messageBalance`
+  - if the asset ID is `0`; an `amount` of the initial free balance plus `(unspentGas * gasPrice) - messageBalance`
   - otherwise; an `amount` of the initial free balance for that asset ID.
 
 ### State Changes

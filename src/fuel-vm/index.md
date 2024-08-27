@@ -22,9 +22,8 @@ This document provides the specification for the Fuel Virtual Machine (FuelVM). 
 | name                    | type     | value   | note                                    |
 |-------------------------|----------|---------|-----------------------------------------|
 | `CONTRACT_MAX_SIZE`     | `uint64` |         | Maximum contract size, in bytes.        |
-| `MEM_MAX_ACCESS_SIZE`   | `uint64` |         | Maximum memory access size, in bytes.   |
 | `VM_MAX_RAM`            | `uint64` | `2**26` | 64 MiB.                                 |
-| `MESSAGE_MAX_DATA_SIZE` | `uint16` |         | Maximum size of message data, in bytes. |
+| `MESSAGE_MAX_DATA_SIZE` | `uint64` |         | Maximum size of message data, in bytes. |
 
 ## Semantics
 
@@ -81,6 +80,7 @@ Every time the VM runs, a single monolithic memory of size `VM_MAX_RAM` bytes is
 To initialize the VM, the following is pushed on the stack sequentially:
 
 1. Transaction hash (`byte[32]`, word-aligned), computed as defined [here](../identifiers/transaction-id.md).
+1. Base asset ID (`byte[32]`, word-aligned)
 1. [`MAX_INPUTS`](../tx-format/consensus_parameters.md) pairs of `(asset_id: byte[32], balance: uint64)`, of:
     1. For [predicate estimation](#predicate-estimation) and [predicate verification](#predicate-verification), zeroes.
     1. For [script execution](#script-execution), the free balance for each asset ID seen in the transaction's inputs, ordered in ascending order. If there are fewer than `MAX_INPUTS` asset IDs, the pair has a value of zero.
@@ -89,7 +89,7 @@ To initialize the VM, the following is pushed on the stack sequentially:
 
 Then the following registers are initialized (without explicit initialization, all registers are initialized to zero):
 
-1. `$ssp = 32 + MAX_INPUTS*(32+8) + size(tx))`: the writable stack area starts immediately after the serialized transaction in memory (see above).
+1. `$ssp = 32 + 32 + MAX_INPUTS*(32+8) + size(tx))`: the writable stack area starts immediately after the serialized transaction in memory (see above).
 1. `$sp = $ssp`: writable stack area is empty to start.
 1. `$hp = VM_MAX_RAM`: the heap area begins at the top and is empty to start.
 
@@ -174,14 +174,26 @@ A call frame consists of the following, word-aligned:
 | 32    | `byte[32]`    | `to`       | Contract ID for this call.                                                    |
 | 32    | `byte[32]`    | `asset_id` | asset ID of forwarded coins.                                                  |
 | 8*64  | `byte[8][64]` | `regs`     | Saved registers from previous context.                                        |
-| 8     | `uint64`      | `codesize` | Code size in bytes.                                 |
+| 8     | `uint64`      | `codesize` | Code size in bytes, padded to the next word boundary.                         |
 | 8     | `byte[8]`     | `param1`   | First parameter.                                                              |
 | 8     | `byte[8]`     | `param2`   | Second parameter.                                                             |
 | 1*    | `byte[]`      | `code`     | Zero-padded to 8-byte alignment, but individual instructions are not aligned. |
 |       |               |            | **Unwritable area ends.**                                                     |
 | *     |               |            | Call frame's stack.                                                           |
 
-## Ownership
+## Access rights
+
+Only memory that has been allocated is accessible.
+In other words, memory between highest-ever `$sp` value and current `$hp`
+is inaccessible. Attempting to read or write
+memory that has not been allocated will result in VM panic.
+Similarly reads or writes that cross from the stack to the heap
+will panic. Note that stack remains readable even after stack
+frame has been shrunk. However, if the heap is afterwards expanded
+to cover that area, the crossing read prohibition still remains,
+while all memory is accessible.
+
+### Ownership
 
 Whenever memory is written to (i.e. with [`SB`](./instruction-set.md#sb-store-byte) or [`SW`](./instruction-set.md#sw-store-word)), or write access is granted (i.e. with [`CALL`](./instruction-set.md#call-call-contract)), ownership must be checked.
 
@@ -195,6 +207,6 @@ If the context is internal, the owned memory range for a call frame is:
 1. `[$ssp, $sp)`: the writable stack area of the call frame.
 1. `[$hp, $fp->$hp)`: the heap area allocated by this call frame.
 
-## Executablity
+### Executability
 
-Memory is only executable in range `[$is, $ssp)`. Attempting to execute instructions outside these boundaries will panic. This area never overlaps with writable registers, essentially providing [W^X](https://en.wikipedia.org/wiki/W%5EX) protection.
+Memory is only executable in range `[$is, $ssp)`. Attempting to execute instructions outside these boundaries will cause a panic. This area never overlaps with writable memory, essentially providing [W^X](https://en.wikipedia.org/wiki/W%5EX) protection.
